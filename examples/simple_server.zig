@@ -84,8 +84,8 @@ fn run() !void {
     // Run the server
     try server.run(.stdio);
 
-    // To run with HTTP (prints url):
-    // try server.run(.{ .http = .{ .port = 8080, .host = "localhost" } });
+    // To run with HTTP transport:
+    // try server.run(.{ .http = .{ .host = "localhost", .port = 8080 } });
 }
 
 fn greetHandler(allocator: std.mem.Allocator, args: ?std.json.Value) mcp.tools.ToolError!mcp.tools.ToolResult {
@@ -99,12 +99,12 @@ fn greetHandler(allocator: std.mem.Allocator, args: ?std.json.Value) mcp.tools.T
 
 fn echoHandler(allocator: std.mem.Allocator, args: ?std.json.Value) mcp.tools.ToolError!mcp.tools.ToolResult {
     const message = mcp.tools.getString(args, "message") orelse "No message provided";
-    
+
     // Demonstrate structured result
     var obj = std.json.ObjectMap.init(allocator);
     obj.put("echo", .{ .string = message }) catch {};
     obj.put("timestamp", .{ .integer = std.time.timestamp() }) catch {};
-    
+
     return mcp.tools.structuredResult(allocator, .{ .object = obj }) catch return mcp.tools.ToolError.OutOfMemory;
 }
 

@@ -22,10 +22,7 @@ try server.run(.stdio);
 ### Client Side
 
 ```zig
-try client.connect(.{
-    .transport = .stdio,
-    .command = "./my-server",
-});
+try client.connectStdio("./my-server", &.{});
 ```
 
 ### How It Works
@@ -52,21 +49,40 @@ For remote MCP servers or web-based integration.
 try server.run(.{ .http = .{ .port = 8080 } });
 ```
 
+Custom host/domain and port:
+
+```zig
+try server.run(.{ .http = .{ .host = "api.example.com", .port = 8443 } });
+```
+
 ### Client Side
 
 ```zig
-try client.connect(.{
-    .transport = .http,
-    .url = "http://localhost:8080",
-});
+try client.connectHttp("http://localhost:8080");
 ```
 
 ### Endpoints
 
-| Endpoint | Method | Description                 |
-| -------- | ------ | --------------------------- |
-| `/`      | POST   | JSON-RPC endpoint           |
-| `/sse`   | GET    | Server-Sent Events (future) |
+| Endpoint | Method | Description       |
+| -------- | ------ | ----------------- |
+| `/`      | POST   | JSON-RPC endpoint |
+
+### HTTP Request Format
+
+Send JSON-RPC payloads as `application/json` with HTTP `POST`:
+
+```bash
+curl -X POST http://localhost:8080 \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1.0.0"}}}'
+```
+
+The response body contains the JSON-RPC response.
+
+### Example Pattern
+
+Server examples default to `stdio` and include commented HTTP run lines.
+To run over HTTP, switch the run call to `server.run(.{ .http = .{ .host = "localhost", .port = 8080 } })`.
 
 ## Custom Transports
 

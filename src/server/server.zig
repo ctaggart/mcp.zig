@@ -5,6 +5,7 @@
 //! resources, prompts, tasks, and all standard MCP methods.
 
 const std = @import("std");
+const http = std.http;
 const protocol = @import("../protocol/protocol.zig");
 const jsonrpc = @import("../protocol/jsonrpc.zig");
 const types = @import("../protocol/types.zig");
@@ -12,6 +13,70 @@ const transport_mod = @import("../transport/transport.zig");
 const tools_mod = @import("tools.zig");
 const resources_mod = @import("resources.zig");
 const prompts_mod = @import("prompts.zig");
+
+const HttpRequestTransport = struct {
+    allocator: std.mem.Allocator,
+    response_message: ?[]const u8 = null,
+    is_closed: bool = false,
+
+    const Self = @This();
+
+    pub fn init(allocator: std.mem.Allocator) Self {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *Self) void {
+        if (self.response_message) |msg| {
+            self.allocator.free(msg);
+            self.response_message = null;
+        }
+    }
+
+    pub fn send(self: *Self, message: []const u8) transport_mod.Transport.SendError!void {
+        if (self.is_closed) return transport_mod.Transport.SendError.ConnectionClosed;
+
+        const owned = self.allocator.dupe(u8, message) catch return transport_mod.Transport.SendError.OutOfMemory;
+        if (self.response_message) |old| {
+            self.allocator.free(old);
+        }
+        self.response_message = owned;
+    }
+
+    pub fn receive(self: *Self) transport_mod.Transport.ReceiveError!?[]const u8 {
+        if (self.is_closed) return transport_mod.Transport.ReceiveError.ConnectionClosed;
+        return null;
+    }
+
+    pub fn close(self: *Self) void {
+        self.is_closed = true;
+    }
+
+    pub fn transport(self: *Self) transport_mod.Transport {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .send = sendVtable,
+                .receive = receiveVtable,
+                .close = closeVtable,
+            },
+        };
+    }
+
+    fn sendVtable(ptr: *anyopaque, message: []const u8) transport_mod.Transport.SendError!void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        return self.send(message);
+    }
+
+    fn receiveVtable(ptr: *anyopaque) transport_mod.Transport.ReceiveError!?[]const u8 {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        return self.receive();
+    }
+
+    fn closeVtable(ptr: *anyopaque) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.close();
+    }
+};
 
 /// Configuration for an MCP Server
 pub const ServerConfig = struct {
@@ -51,6 +116,7 @@ pub const Server = struct {
     next_request_id: i64 = 1,
     pending_requests: std.AutoHashMap(i64, PendingRequest),
     log_level: protocol.LogLevel = .info,
+    pub const max_http_body_size: usize = 4 * 1024 * 1024;
 
     const Self = @This();
 
@@ -137,9 +203,14 @@ pub const Server = struct {
     }
 
     /// Options for running the server
+    pub const HttpRunConfig = struct {
+        port: u16 = 8080,
+        host: []const u8 = "localhost",
+    };
+
     pub const RunOptions = union(enum) {
         stdio: void,
-        http: struct { port: u16 = 8080, host: []const u8 = "localhost" },
+        http: HttpRunConfig,
     };
 
     /// Run the server with the specified transport
@@ -154,17 +225,162 @@ pub const Server = struct {
                 try self.messageLoop();
             },
             .http => |config| {
-                const url = try std.fmt.allocPrint(self.allocator, "http://{s}:{d}", .{ config.host, config.port });
-                defer self.allocator.free(url);
-
-                std.log.info("Server listening on {s}", .{url});
-
-                const http = try self.allocator.create(transport_mod.HttpTransport);
-                http.* = try transport_mod.HttpTransport.init(self.allocator, url);
-                self.transport = http.transport();
-                try self.messageLoop();
+                try self.runHttp(config);
             },
         }
+    }
+
+    fn runHttp(self: *Self, config: HttpRunConfig) !void {
+        const address = std.net.Address.resolveIp(config.host, config.port) catch {
+            return error.AddressResolutionError;
+        };
+
+        var listener = try address.listen(.{ .reuse_address = true });
+        defer listener.deinit();
+
+        std.log.info("Server listening on http://{f}", .{listener.listen_address});
+
+        while (self.state != .stopped and self.state != .shutting_down) {
+            const connection = listener.accept() catch |err| {
+                std.log.err("HTTP accept failed: {s}", .{@errorName(err)});
+                continue;
+            };
+
+            self.serveHttpConnection(connection) catch |err| {
+                std.log.err("HTTP connection error: {s}", .{@errorName(err)});
+            };
+        }
+    }
+
+    fn serveHttpConnection(self: *Self, connection: std.net.Server.Connection) !void {
+        defer connection.stream.close();
+
+        var send_buffer: [4096]u8 = undefined;
+        var recv_buffer: [4096]u8 = undefined;
+        var connection_reader = connection.stream.reader(&recv_buffer);
+        var connection_writer = connection.stream.writer(&send_buffer);
+        var server: http.Server = .init(connection_reader.interface(), &connection_writer.interface);
+
+        while (true) {
+            var request = server.receiveHead() catch |err| switch (err) {
+                error.HttpConnectionClosing => return,
+                else => return err,
+            };
+
+            if (request.head.method != .POST) {
+                try request.respond("Method Not Allowed", .{
+                    .status = .method_not_allowed,
+                    .extra_headers = &.{
+                        .{ .name = "Content-Type", .value = "text/plain" },
+                    },
+                });
+                continue;
+            }
+
+            try self.handleHttpJsonRpcRequest(&request);
+        }
+    }
+
+    fn handleHttpJsonRpcRequest(self: *Self, request: *http.Server.Request) !void {
+        var read_buffer: [2048]u8 = undefined;
+        var body_reader = request.readerExpectContinue(&read_buffer) catch {
+            try request.respond("Invalid request body", .{
+                .status = .bad_request,
+                .extra_headers = &.{
+                    .{ .name = "Content-Type", .value = "text/plain" },
+                },
+            });
+            return;
+        };
+
+        var body = std.ArrayList(u8){};
+        defer body.deinit(self.allocator);
+        const writer = body.writer(self.allocator);
+
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            const n = body_reader.readSliceShort(&buf) catch {
+                try request.respond("Failed to read request body", .{
+                    .status = .bad_request,
+                    .extra_headers = &.{
+                        .{ .name = "Content-Type", .value = "text/plain" },
+                    },
+                });
+                return;
+            };
+            if (n == 0) break;
+
+            if (body.items.len + n > max_http_body_size) {
+                try request.respond("Request body too large", .{
+                    .status = .bad_request,
+                    .extra_headers = &.{
+                        .{ .name = "Content-Type", .value = "text/plain" },
+                    },
+                });
+                return;
+            }
+
+            writer.writeAll(buf[0..n]) catch {
+                try request.respond("Out of memory", .{
+                    .status = .internal_server_error,
+                    .extra_headers = &.{
+                        .{ .name = "Content-Type", .value = "text/plain" },
+                    },
+                });
+                return;
+            };
+        }
+
+        if (body.items.len == 0) {
+            try request.respond("Empty JSON-RPC payload", .{
+                .status = .bad_request,
+                .extra_headers = &.{
+                    .{ .name = "Content-Type", .value = "text/plain" },
+                },
+            });
+            return;
+        }
+
+        var request_transport = HttpRequestTransport.init(self.allocator);
+        defer request_transport.deinit();
+
+        const previous_transport = self.transport;
+        self.transport = request_transport.transport();
+        defer self.transport = previous_transport;
+
+        self.handleMessage(body.items) catch {
+            const internal_error = jsonrpc.createParseError(.{ .string = "Internal server error" });
+            const json = jsonrpc.serializeMessage(self.allocator, .{ .error_response = internal_error }) catch {
+                try request.respond("Internal server error", .{
+                    .status = .internal_server_error,
+                    .extra_headers = &.{
+                        .{ .name = "Content-Type", .value = "text/plain" },
+                    },
+                });
+                return;
+            };
+            defer self.allocator.free(json);
+
+            try request.respond(json, .{
+                .status = .internal_server_error,
+                .extra_headers = &.{
+                    .{ .name = "Content-Type", .value = "application/json" },
+                },
+            });
+            return;
+        };
+
+        if (request_transport.response_message) |response_json| {
+            try request.respond(response_json, .{
+                .status = .ok,
+                .extra_headers = &.{
+                    .{ .name = "Content-Type", .value = "application/json" },
+                },
+            });
+            return;
+        }
+
+        try request.respond("", .{ .status = .no_content });
     }
 
     /// Run the server with a custom transport

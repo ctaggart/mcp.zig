@@ -79,6 +79,9 @@ fn run() !void {
     server.enableLogging();
     server.enableTasks();
     try server.run(.stdio);
+
+    // To run with HTTP transport:
+    // try server.run(.{ .http = .{ .host = "localhost", .port = 8080 } });
 }
 
 fn addHandler(allocator: std.mem.Allocator, args: ?std.json.Value) mcp.tools.ToolError!mcp.tools.ToolResult {

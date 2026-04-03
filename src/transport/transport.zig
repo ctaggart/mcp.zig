@@ -212,7 +212,89 @@ pub const HttpTransport = struct {
     /// Sends a JSON-RPC message via HTTP POST.
     pub fn send(self: *Self, message: []const u8) Transport.SendError!void {
         if (self.is_closed) return Transport.SendError.ConnectionClosed;
-        _ = message;
+
+        var client = std.http.Client{ .allocator = self.allocator };
+        defer client.deinit();
+
+        const uri = std.Uri.parse(self.endpoint) catch return Transport.SendError.WriteError;
+
+        var extra_headers = std.ArrayList(std.http.Header){};
+        defer extra_headers.deinit(self.allocator);
+
+        extra_headers.append(self.allocator, .{ .name = "Content-Type", .value = "application/json" }) catch {
+            return Transport.SendError.OutOfMemory;
+        };
+        extra_headers.append(self.allocator, .{ .name = "Accept", .value = "application/json" }) catch {
+            return Transport.SendError.OutOfMemory;
+        };
+        extra_headers.append(self.allocator, .{ .name = "MCP-Protocol-Version", .value = self.protocol_version }) catch {
+            return Transport.SendError.OutOfMemory;
+        };
+
+        var authorization_value: ?[]u8 = null;
+        defer if (authorization_value) |owned| self.allocator.free(owned);
+
+        if (self.authorization_token) |token| {
+            authorization_value = std.fmt.allocPrint(self.allocator, "Bearer {s}", .{token}) catch {
+                return Transport.SendError.OutOfMemory;
+            };
+            extra_headers.append(self.allocator, .{ .name = "Authorization", .value = authorization_value.? }) catch {
+                return Transport.SendError.OutOfMemory;
+            };
+        }
+
+        if (self.session_id) |sid| {
+            extra_headers.append(self.allocator, .{ .name = "MCP-Session-Id", .value = sid }) catch {
+                return Transport.SendError.OutOfMemory;
+            };
+        }
+
+        var req = client.request(.POST, uri, .{
+            .headers = .{ .user_agent = .{ .override = "mcp.zig" } },
+            .extra_headers = extra_headers.items,
+        }) catch return Transport.SendError.WriteError;
+        defer req.deinit();
+
+        req.transfer_encoding = .{ .content_length = message.len };
+
+        var body_writer = req.sendBodyUnflushed(&.{}) catch return Transport.SendError.WriteError;
+        body_writer.writer.writeAll(message) catch return Transport.SendError.WriteError;
+        body_writer.end() catch return Transport.SendError.WriteError;
+        req.connection.?.flush() catch return Transport.SendError.WriteError;
+
+        const redirect_buffer = self.allocator.alloc(u8, 8 * 1024) catch return Transport.SendError.OutOfMemory;
+        defer self.allocator.free(redirect_buffer);
+
+        var response = req.receiveHead(redirect_buffer) catch return Transport.SendError.WriteError;
+
+        var header_it = response.head.iterateHeaders();
+        while (header_it.next()) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "mcp-session-id")) {
+                self.setSessionId(header.value) catch return Transport.SendError.OutOfMemory;
+            }
+        }
+
+        var transfer_buffer: [1024]u8 = undefined;
+        var reader = response.reader(&transfer_buffer);
+
+        var body = std.ArrayList(u8){};
+        defer body.deinit(self.allocator);
+        const writer = body.writer(self.allocator);
+
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            const n = reader.readSliceShort(&buf) catch return Transport.SendError.WriteError;
+            if (n == 0) break;
+            writer.writeAll(buf[0..n]) catch return Transport.SendError.OutOfMemory;
+        }
+
+        if (body.items.len == 0) return;
+
+        const owned = self.allocator.dupe(u8, body.items) catch return Transport.SendError.OutOfMemory;
+        self.pending_responses.append(self.allocator, owned) catch {
+            self.allocator.free(owned);
+            return Transport.SendError.OutOfMemory;
+        };
     }
 
     /// Receives a response from the pending queue.

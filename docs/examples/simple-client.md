@@ -1,163 +1,124 @@
 # Simple Client Example
 
-A minimal MCP client that connects to servers.
+A complete MCP client setup example using mcp.zig.
 
 ## Overview
 
 This example demonstrates how to:
 
-- Create an MCP client
-- Configure capabilities
-- Connect to a server (conceptually)
+- create and initialize an MCP client
+- enable client-side MCP capabilities
+- configure roots for filesystem boundaries
+- prepare for stdio and HTTP server connections
 
-## Source Code
+## Full Source Code
 
 ```zig
 //! Simple MCP Client Example
 //!
-//! Demonstrates basic client setup and configuration.
+//! This example demonstrates how to create an MCP client
+//! that connects to a server.
 
 const std = @import("std");
 const mcp = @import("mcp");
 
-pub fn main() !void {
-    // Get command line args
-    const args = std.process.args();
-    _ = args.skip(); // Skip program name
-
-    const server_command = args.next() orelse {
-        std.debug.print("Usage: example-client <server-command>\n", .{});
-        std.debug.print("Example: example-client zig-out/bin/example-server\n", .{});
-        return;
+pub fn main() void {
+    run() catch |err| {
+        mcp.reportError(err);
     };
+}
 
-    std.debug.print("Would connect to server: {s}\n", .{server_command});
-
-    // Initialize allocator
+fn run() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Create the client
+    // Get command line args for server path
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    if (args.len < 2) {
+        std.debug.print("Usage: {s} <server-command>\n", .{args[0]});
+        std.debug.print("Example: {s} zig-out/bin/example-server\n", .{args[0]});
+        return;
+    }
+
+    // Create client
     var client = mcp.Client.init(.{
         .name = "simple-client",
         .version = "1.0.0",
+        .title = "Simple MCP Client",
         .allocator = allocator,
     });
     defer client.deinit();
 
     // Enable capabilities
-    client.enableRoots();
     client.enableSampling();
+    client.enableElicitation();
+    client.enableTasks();
+    client.enableRoots(true);
 
     // Add some roots
     try client.addRoot("file:///home/user/documents", "Documents");
     try client.addRoot("file:///home/user/projects", "Projects");
 
-    // Print configuration
-    std.debug.print("\nClient Configuration:\n", .{});
-    std.debug.print("  Name: {s}\n", .{client.config.name});
-    std.debug.print("  Version: {s}\n", .{client.config.version});
-    std.debug.print("  Roots configured: {d}\n", .{client.roots_list.items.len});
+    std.debug.print("MCP Client initialized\n", .{});
+    std.debug.print("Client: {s} v{s}\n", .{ client.config.name, client.config.version });
+    std.debug.print("Roots configured: {d}\n", .{client.roots_list.items.len});
 
     // In a real implementation, you would:
-    // 1. Spawn the server process
-    // 2. Connect via transport
-    // 3. Send initialize request
-    // 4. Call tools, read resources, etc.
+    // 1. Connect to server: try client.connectStdio(args[1], &.{});
+    // 2. List tools: try client.listTools();
+    // 3. Call tools: try client.callTool("greet", args);
+    // 4. Handle responses in an event loop
 
-    std.debug.print("\nClient initialized successfully!\n", .{});
+    std.debug.print("\nTo connect to a server, run:\n", .{});
+    std.debug.print("  echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{}}}}' | .\\zig-out\\bin\\example-server\n", .{});
 }
 ```
 
-## How Clients Work
+## Client-Side API Explained
 
-### 1. Initialization
+1. Client.init creates a client identity used during MCP initialize.
+2. enableSampling enables model sampling capability negotiation.
+3. enableElicitation enables user-input elicitation capability.
+4. enableTasks enables task-related MCP methods.
+5. enableRoots(true) enables roots capability and listChanged notification handling.
+6. addRoot registers filesystem roots that the server may request.
 
-```zig
-var client = mcp.Client.init(.{
-    .name = "my-client",
-    .version = "1.0.0",
-    .allocator = allocator,
-});
-```
+## Connection APIs
 
-### 2. Enable Capabilities
-
-```zig
-client.enableRoots();     // File system roots
-client.enableSampling();  // Sampling requests
-```
-
-### 3. Configure Roots
+For stdio servers:
 
 ```zig
-try client.addRoot("file:///path", "Name");
+try client.connectStdio("./zig-out/bin/example-server", &.{});
 ```
 
-### 4. Connect (Full Implementation)
+For HTTP servers:
 
 ```zig
-// Would spawn server and initialize connection
-try client.connect(.{
-    .transport = .stdio,
-    .command = "./server",
-});
-
-// Initialize handshake
-const server_info = try client.initialize();
-std.debug.print("Connected to: {s}\n", .{server_info.name});
+try client.connectHttp("http://localhost:8080");
 ```
 
-### 5. Use Server Capabilities
+## Expected Console Output
 
-```zig
-// List available tools
-const tools = try client.listTools();
+When run with valid args, the program prints:
 
-// Call a tool
-const result = try client.callTool("greet", .{
-    .object = args,
-});
-
-// Read a resource
-const content = try client.readResource("file:///data.txt");
+```text
+MCP Client initialized
+Client: simple-client v1.0.0
+Roots configured: 2
 ```
 
-## Running the Example
-
-### Build
+## Build and Run
 
 ```bash
 zig build
-```
-
-### Run
-
-```bash
 ./zig-out/bin/example-client ./zig-out/bin/example-server
-```
-
-## Protocol Flow
-
-```
-Client                              Server
-  |                                    |
-  |--- initialize ------------------->|
-  |<-- initialize response -----------|
-  |                                    |
-  |--- initialized ------------------>|
-  |                                    |
-  |--- tools/list ------------------->|
-  |<-- tools list --------------------|
-  |                                    |
-  |--- tools/call ------------------->|
-  |<-- tool result -------------------|
-  |                                    |
 ```
 
 ## Next Steps
 
-- [Server Guide](/guide/server) - Learn about servers
-- [Client Guide](/guide/client) - Full client documentation
-- [Tools Guide](/guide/tools) - Understanding tools
+- [Client Guide](/guide/client)
+- [Transport Guide](/guide/transport)
+- [Simple Server](/examples/simple-server)

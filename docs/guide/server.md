@@ -1,6 +1,6 @@
 # Server
 
-The `Server` is the main component for exposing MCP capabilities to AI clients.
+The Server is the main runtime component for exposing MCP capabilities to AI clients.
 
 ## Creating a Server
 
@@ -17,23 +17,27 @@ defer server.deinit();
 
 ## Configuration
 
-| Option        | Type          | Description               |
-| ------------- | ------------- | ------------------------- |
-| `name`        | `[]const u8`  | Server name (required)    |
-| `version`     | `[]const u8`  | Server version (required) |
-| `allocator`   | `Allocator`   | Memory allocator          |
-| `title`       | `?[]const u8` | Human-readable title      |
-| `description` | `?[]const u8` | Server description        |
+| Option | Type | Description |
+| --- | --- | --- |
+| name | []const u8 | Server name (required) |
+| version | []const u8 | Server version (required) |
+| allocator | std.mem.Allocator | Memory allocator |
+| title | ?[]const u8 | Human-readable title |
+| description | ?[]const u8 | Server description |
+| instructions | ?[]const u8 | Optional server usage instructions |
 
 ## Capabilities
 
-Enable server capabilities:
+Capabilities are enabled by registration and explicit toggles:
 
 ```zig
-server.enableTools();
-server.enableResources(true); // true = subscribe support
-server.enablePrompts(true);   // true = listChanged support
+try server.addTool(tool);
+try server.addResource(resource);
+try server.addPrompt(prompt);
+
 server.enableLogging();
+server.enableCompletions();
+server.enableTasks();
 ```
 
 ## Running the Server
@@ -54,7 +58,13 @@ For remote access:
 try server.run(.{ .http = .{ .host = "127.0.0.1", .port = 8080 } });
 ```
 
-The server will log the listening address to stderr (e.g., `Server listening on http://127.0.0.1:8080`).
+You can also bind custom domains/hosts and ports:
+
+```zig
+try server.run(.{ .http = .{ .host = "api.example.com", .port = 8443 } });
+```
+
+The HTTP mode accepts JSON-RPC POST requests at the root path.
 
 ## Registering Components
 
@@ -65,7 +75,6 @@ try server.addTool(.{
     .name = "calculate",
     .description = "Perform calculations",
     .handler = calcHandler,
-    .input_schema = schema,
 });
 ```
 
@@ -90,31 +99,17 @@ try server.addPrompt(.{
 });
 ```
 
-## Server Events
-
-Handle server lifecycle events:
-
-```zig
-server.onInitialize = struct {
-    fn callback(client_info: mcp.types.Implementation) void {
-        std.debug.print("Client connected: {s}\n", .{client_info.name});
-    }
-}.callback;
-```
-
 ## Error Handling
 
 The server handles errors gracefully:
 
 ```zig
 fn toolHandler(allocator: Allocator, args: ?json.Value) ToolError!ToolResult {
-    // Return an error if something goes wrong
-    if (invalid_input) {
-        return error.InvalidArguments;
-    }
+    const message = mcp.tools.getString(args, "message") orelse {
+        return mcp.tools.errorResult(allocator, "Missing required argument: message") catch return mcp.tools.ToolError.OutOfMemory;
+    };
 
-    // Normal processing
-    return .{ .content = &.{} };
+    return mcp.tools.textResult(allocator, message) catch return mcp.tools.ToolError.OutOfMemory;
 }
 ```
 
@@ -143,11 +138,7 @@ fn run() !void {
     });
     defer server.deinit();
 
-    // Enable capabilities
-    server.enableTools();
-    server.enableResources(false);
-
-    // Add tools
+    // Register at least one tool/resource/prompt.
     try server.addTool(.{
         .name = "echo",
         .description = "Echo back the input",
@@ -155,7 +146,7 @@ fn run() !void {
     });
 
     // Run
-    std.debug.print("Server starting...\n", .{});
+    server.enableLogging();
     try server.run(.stdio);
 }
 

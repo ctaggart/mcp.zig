@@ -1,184 +1,195 @@
 # Weather Server Example
 
-A more advanced MCP server that demonstrates multiple tools with external data simulation.
+A full MCP server example with validation, resources, templates, and realistic weather tool contracts.
 
 ## Overview
 
-This example shows how to:
+This example demonstrates:
 
-- Create multiple related tools
-- Simulate external API calls
-- Handle complex arguments
-- Return structured data
+- argument validation for tool inputs
+- multiple tools with focused responsibilities
+- resource and resource-template registration
+- capability toggles (logging, completions, tasks)
 
-## Features
-
-- **get_weather**: Get current weather for a location
-- **get_forecast**: Get weather forecast
-- **weather_alerts**: Check for weather alerts
-
-## Source Code
+## Full Source Code
 
 ```zig
 //! Weather Server Example
 //!
-//! Demonstrates a more complex MCP server with multiple tools.
+//! This example replicates the weather server from the MCP documentation,
+//! demonstrating how to create a practical MCP server.
 
 const std = @import("std");
 const mcp = @import("mcp");
 
-pub fn main() !void {
+const NWS_API_BASE = "https://api.weather.gov";
+
+pub fn main() void {
+    run() catch |err| {
+        mcp.reportError(err);
+    };
+}
+
+fn run() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    // Create weather server
     var server = mcp.Server.init(.{
         .name = "weather-server",
         .version = "1.0.0",
-        .description = "Provides weather information",
+        .title = "Weather Server",
+        .description = "Get weather alerts and forecasts for US locations",
+        .instructions = "Use get_alerts to check weather alerts for a US state, or get_forecast to get the forecast for a location.",
         .allocator = allocator,
     });
     defer server.deinit();
 
-    server.enableTools();
-
-    // Current weather
+    // Add get_alerts tool
     try server.addTool(.{
-        .name = "get_weather",
-        .description = "Get current weather for a location",
-        .handler = getCurrentWeather,
+        .name = "get_alerts",
+        .description = "Get weather alerts for a US state",
+        .title = "Get Weather Alerts",
+        .annotations = .{
+            .readOnlyHint = true,
+            .idempotentHint = true,
+            .destructiveHint = false,
+        },
+        .handler = getAlertsHandler,
     });
 
-    // Forecast
+    // Add get_forecast tool
     try server.addTool(.{
         .name = "get_forecast",
-        .description = "Get weather forecast for upcoming days",
-        .handler = getForecast,
+        .description = "Get weather forecast for a location",
+        .title = "Get Weather Forecast",
+        .annotations = .{
+            .readOnlyHint = true,
+            .idempotentHint = true,
+            .destructiveHint = false,
+        },
+        .handler = getForecastHandler,
     });
 
-    // Alerts
-    try server.addTool(.{
-        .name = "weather_alerts",
-        .description = "Check for active weather alerts",
-        .handler = getAlerts,
+    // Add a weather info resource
+    try server.addResource(.{
+        .uri = "weather://info",
+        .name = "Weather API Info",
+        .description = "Information about the weather data source",
+        .mimeType = "text/plain",
+        .handler = weatherInfoHandler,
     });
 
-    std.debug.print("Weather server starting...\n", .{});
+    // Add resource template for state alerts
+    try server.addResourceTemplate(.{
+        .uriTemplate = "weather://alerts/{state}",
+        .name = "state-alerts",
+        .title = "State Weather Alerts",
+        .description = "Get weather alerts for a specific US state",
+        .mimeType = "application/json",
+    });
+
+    // Enable logging, completions, and tasks
+    server.enableLogging();
+    server.enableCompletions();
+    server.enableTasks();
+
+    // Run the server
     try server.run(.stdio);
+
+    // To run with HTTP transport:
+    // try server.run(.{ .http = .{ .host = "localhost", .port = 8080 } });
 }
 
-fn getCurrentWeather(
-    allocator: std.mem.Allocator,
-    args: ?std.json.Value,
-) mcp.tools.ToolError!mcp.tools.ToolResult {
-    const location = mcp.tools.getStringArg(args, "location") orelse {
-        return error.InvalidArguments;
+fn getAlertsHandler(allocator: std.mem.Allocator, args: ?std.json.Value) mcp.tools.ToolError!mcp.tools.ToolResult {
+    const state = mcp.tools.getString(args, "state") orelse {
+        return mcp.tools.errorResult(allocator, "Missing required argument: state (two-letter US state code)") catch return mcp.tools.ToolError.OutOfMemory;
     };
 
-    // Simulate weather data
-    const weather = try std.fmt.allocPrint(
-        allocator,
-        \\Weather for {s}:
-        \\  Temperature: 72°F (22°C)
-        \\  Conditions: Partly Cloudy
-        \\  Humidity: 45%
-        \\  Wind: 8 mph NW
-        \\  UV Index: 6 (High)
-    ,
-        .{location},
-    );
-
-    return .{ .content = &.{mcp.Content.createText(weather)} };
-}
-
-fn getForecast(
-    allocator: std.mem.Allocator,
-    args: ?std.json.Value,
-) mcp.tools.ToolError!mcp.tools.ToolResult {
-    const location = mcp.tools.getStringArg(args, "location") orelse {
-        return error.InvalidArguments;
-    };
-
-    const days = mcp.tools.getNumberArg(args, "days") orelse 3;
-    const days_int: u32 = @intFromFloat(days);
-
-    var forecast = std.ArrayList(u8).init(allocator);
-    const writer = forecast.writer();
-
-    try writer.print("5-Day Forecast for {s}:\n\n", .{location});
-
-    const conditions = [_][]const u8{ "Sunny", "Partly Cloudy", "Cloudy", "Light Rain", "Clear" };
-    const temps = [_]u8{ 75, 72, 68, 65, 70 };
-
-    var i: u32 = 0;
-    while (i < @min(days_int, 5)) : (i += 1) {
-        try writer.print("Day {d}: {s}, High: {d}°F\n", .{
-            i + 1,
-            conditions[i],
-            temps[i],
-        });
+    // Validate state code
+    if (state.len != 2) {
+        return mcp.tools.errorResult(allocator, "State must be a two-letter code (e.g., CA, NY, TX)") catch return mcp.tools.ToolError.OutOfMemory;
     }
 
-    return .{ .content = &.{mcp.Content.createText(forecast.items)} };
-}
-
-fn getAlerts(
-    allocator: std.mem.Allocator,
-    args: ?std.json.Value,
-) mcp.tools.ToolError!mcp.tools.ToolResult {
-    const location = mcp.tools.getStringArg(args, "location") orelse {
-        return error.InvalidArguments;
-    };
-
-    // Simulate checking for alerts
-    const alert_check = try std.fmt.allocPrint(
-        allocator,
+    var buf: [1024]u8 = undefined;
+    const result = std.fmt.bufPrint(&buf,
         \\Weather Alerts for {s}:
         \\
-        \\✓ No active weather alerts at this time.
+        \\No active alerts at this time.
         \\
-        \\Conditions are normal. Enjoy the weather!
-    ,
-        .{location},
-    );
+        \\Note: This is a demo. In production, this would fetch real data from:
+        \\{s}/alerts/active/area/{s}
+    , .{ state, NWS_API_BASE, state }) catch "Error formatting response";
 
-    return .{ .content = &.{mcp.Content.createText(alert_check)} };
+    return mcp.tools.textResult(allocator, result) catch return mcp.tools.ToolError.OutOfMemory;
+}
+
+fn getForecastHandler(allocator: std.mem.Allocator, args: ?std.json.Value) mcp.tools.ToolError!mcp.tools.ToolResult {
+    const lat = mcp.tools.getFloat(args, "latitude") orelse {
+        return mcp.tools.errorResult(allocator, "Missing required argument: latitude") catch return mcp.tools.ToolError.OutOfMemory;
+    };
+
+    const lon = mcp.tools.getFloat(args, "longitude") orelse {
+        return mcp.tools.errorResult(allocator, "Missing required argument: longitude") catch return mcp.tools.ToolError.OutOfMemory;
+    };
+
+    if (lat < -90 or lat > 90) {
+        return mcp.tools.errorResult(allocator, "Latitude must be between -90 and 90") catch return mcp.tools.ToolError.OutOfMemory;
+    }
+    if (lon < -180 or lon > 180) {
+        return mcp.tools.errorResult(allocator, "Longitude must be between -180 and 180") catch return mcp.tools.ToolError.OutOfMemory;
+    }
+
+    var buf: [2048]u8 = undefined;
+    const result = std.fmt.bufPrint(&buf,
+        \\Weather Forecast for ({d:.4}, {d:.4}):
+        \\
+        \\Today:
+        \\  Temperature: 72°F
+        \\  Wind: 5 mph NW
+        \\  Conditions: Partly cloudy
+        \\
+        \\Tonight:
+        \\  Temperature: 55°F
+        \\  Wind: 3 mph W
+        \\  Conditions: Clear
+        \\
+        \\Tomorrow:
+        \\  Temperature: 75°F
+        \\  Wind: 8 mph SW
+        \\  Conditions: Sunny
+        \\
+        \\Note: This is demo data. Production would fetch from:
+        \\{s}/points/{d:.4},{d:.4}
+    , .{ lat, lon, NWS_API_BASE, lat, lon }) catch "Error formatting response";
+
+    return mcp.tools.textResult(allocator, result) catch return mcp.tools.ToolError.OutOfMemory;
+}
+
+fn weatherInfoHandler(_: std.mem.Allocator, uri: []const u8) mcp.resources.ResourceError!mcp.resources.ResourceContent {
+    return .{
+        .uri = uri,
+        .mimeType = "text/plain",
+        .text =
+        \\Weather Server - Data Source Information
+        \\
+        \\This server uses the National Weather Service API.
+        \\API Base URL: https://api.weather.gov
+        \\
+        \\Available Tools:
+        \\- get_alerts: Get active weather alerts for a US state
+        \\- get_forecast: Get weather forecast for coordinates
+        \\
+        \\Note: Only US locations are supported.
+        ,
+    };
 }
 ```
 
-## Tool Specifications
+## Example Requests
 
-### get_weather
-
-| Argument   | Type   | Required | Description           |
-| ---------- | ------ | -------- | --------------------- |
-| `location` | string | Yes      | City or location name |
-
-### get_forecast
-
-| Argument   | Type   | Required | Description           |
-| ---------- | ------ | -------- | --------------------- |
-| `location` | string | Yes      | City or location name |
-| `days`     | number | No       | Number of days (1-5)  |
-
-### weather_alerts
-
-| Argument   | Type   | Required | Description           |
-| ---------- | ------ | -------- | --------------------- |
-| `location` | string | Yes      | City or location name |
-
-## Usage
-
-### Build and Run
-
-```bash
-zig build
-./zig-out/bin/weather-server
-```
-
-### Example Requests
-
-Get current weather:
+Get alerts:
 
 ```json
 {
@@ -186,9 +197,9 @@ Get current weather:
   "id": 1,
   "method": "tools/call",
   "params": {
-    "name": "get_weather",
+    "name": "get_alerts",
     "arguments": {
-      "location": "San Francisco"
+      "state": "CA"
     }
   }
 }
@@ -204,35 +215,21 @@ Get forecast:
   "params": {
     "name": "get_forecast",
     "arguments": {
-      "location": "New York",
-      "days": 5
+      "latitude": 37.7749,
+      "longitude": -122.4194
     }
   }
 }
 ```
 
-## Extending the Example
+## Output Behavior
 
-### Add Real Weather API
-
-```zig
-fn fetchRealWeather(allocator: Allocator, location: []const u8) !WeatherData {
-    // Use std.http.Client to fetch from a real API
-    var client = std.http.Client{ .allocator = allocator };
-    defer client.deinit();
-
-    // Make API request...
-}
-```
-
-### Add More Tools
-
-- `get_hourly_forecast` - Hour by hour forecast
-- `get_historical` - Historical weather data
-- `compare_cities` - Compare weather between cities
+- invalid state/coordinates return MCP error results
+- valid inputs return formatted text output payloads
+- resource reads return weather API information text
 
 ## Next Steps
 
-- [Calculator Server](/examples/calculator-server) - Input validation
-- [Tools Guide](/guide/tools) - Advanced tool patterns
-- [Error Handling](/guide/error-handling) - Handle errors gracefully
+- [Tools Guide](/guide/tools)
+- [Resources Guide](/guide/resources)
+- [Calculator Server](/examples/calculator-server)

@@ -69,6 +69,18 @@ You can also test by sending JSON-RPC messages directly:
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1.0.0"}}}' | ./zig-out/bin/example-server
 ```
 
+For HTTP transport mode:
+
+```bash
+./zig-out/bin/example-server
+# switch run line in source to HTTP mode:
+# try server.run(.{ .http = .{ .host = "localhost", .port = 8080 } });
+
+curl -X POST http://localhost:8080 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1.0.0"}}}'
+```
+
 ## Project Structure
 
 ```
