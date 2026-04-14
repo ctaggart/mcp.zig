@@ -113,6 +113,8 @@ pub const Server = struct {
     client_capabilities: ?types.ClientCapabilities = null,
     transport: ?transport_mod.Transport = null,
     stdio_transport: ?*transport_mod.StdioTransport = null,
+    http_listener: ?*std.Io.net.Server = null,
+    http_io: ?std.Io = null,
     next_request_id: i64 = 1,
     pending_requests: std.AutoHashMap(i64, PendingRequest),
     log_level: protocol.LogLevel = .info,
@@ -233,35 +235,59 @@ pub const Server = struct {
     fn runHttp(self: *Self, config: HttpRunConfig) !void {
         const bind_host = if (std.mem.eql(u8, config.host, "localhost")) "127.0.0.1" else config.host;
 
-        const address = std.net.Address.resolveIp(bind_host, config.port) catch {
+        var address = std.Io.net.IpAddress.parseIp4(bind_host, config.port) catch {
             return error.AddressResolutionError;
         };
 
-        var listener = try address.listen(.{ .reuse_address = true });
-        defer listener.deinit();
+        var threaded_io: std.Io.Threaded = .init(self.allocator, .{});
+        defer threaded_io.deinit();
+        const io = threaded_io.io();
 
-        std.log.info("Server listening on http://{f}", .{listener.listen_address});
+        var listener = address.listen(io, .{ .reuse_address = true }) catch {
+            return error.ListenFailed;
+        };
+        self.http_listener = &listener;
+        self.http_io = io;
+        defer {
+            listener.deinit(io);
+            self.http_listener = null;
+            self.http_io = null;
+        }
+
+        std.log.info("MCP server listening on http://{s}:{d}/mcp", .{ bind_host, config.port });
 
         while (self.state != .stopped and self.state != .shutting_down) {
-            const connection = listener.accept() catch |err| {
+            const stream = listener.accept(io) catch |err| {
+                if (self.state == .stopped or self.state == .shutting_down) break;
                 std.log.err("HTTP accept failed: {s}", .{@errorName(err)});
                 continue;
             };
 
-            self.serveHttpConnection(connection) catch |err| {
+            self.serveHttpStream(stream, io) catch |err| {
                 std.log.err("HTTP connection error: {s}", .{@errorName(err)});
             };
         }
     }
 
-    fn serveHttpConnection(self: *Self, connection: std.net.Server.Connection) !void {
-        defer connection.stream.close();
+    /// Shut down the HTTP server from another thread.
+    pub fn shutdown(self: *Self) void {
+        self.state = .shutting_down;
+        // Close the listener socket to unblock accept().
+        if (self.http_listener) |l| {
+            if (self.http_io) |io| {
+                l.deinit(io);
+            }
+        }
+    }
+
+    fn serveHttpStream(self: *Self, stream: std.Io.net.Stream, io: std.Io) !void {
+        defer stream.close(io);
 
         var send_buffer: [4096]u8 = undefined;
         var recv_buffer: [4096]u8 = undefined;
-        var connection_reader = connection.stream.reader(&recv_buffer);
-        var connection_writer = connection.stream.writer(&send_buffer);
-        var server: http.Server = .init(connection_reader.interface(), &connection_writer.interface);
+        var connection_reader = std.Io.net.Stream.Reader.init(stream, io, &recv_buffer);
+        var connection_writer = std.Io.net.Stream.Writer.init(stream, io, &send_buffer);
+        var server: http.Server = .init(&connection_reader.interface, &connection_writer.interface);
 
         var request = server.receiveHead() catch |err| switch (err) {
             error.HttpConnectionClosing => return,

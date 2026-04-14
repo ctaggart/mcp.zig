@@ -64,7 +64,7 @@ pub const StdioTransport = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
             .allocator = allocator,
-            .read_buffer = .{},
+            .read_buffer = .empty,
         };
     }
 
@@ -77,9 +77,9 @@ pub const StdioTransport = struct {
     pub fn send(self: *Self, message: []const u8) Transport.SendError!void {
         if (self.is_closed) return Transport.SendError.ConnectionClosed;
 
-        const stdout = std.fs.File.stdout();
-        stdout.writeAll(message) catch return Transport.SendError.WriteError;
-        stdout.writeAll("\n") catch return Transport.SendError.WriteError;
+        const stdout_fd = std.posix.STDOUT_FILENO;
+        writeAllFd(stdout_fd, message) catch return Transport.SendError.WriteError;
+        writeAllFd(stdout_fd, "\n") catch return Transport.SendError.WriteError;
     }
 
     /// Sends a JSON-RPC message object.
@@ -95,11 +95,11 @@ pub const StdioTransport = struct {
 
         self.read_buffer.clearRetainingCapacity();
 
-        const stdin = std.fs.File.stdin();
+        const stdin_fd = std.posix.STDIN_FILENO;
 
         while (true) {
             var buf: [1]u8 = undefined;
-            const bytes_read = stdin.read(&buf) catch return Transport.ReceiveError.ReadError;
+            const bytes_read = readFd(stdin_fd, &buf) catch return Transport.ReceiveError.ReadError;
 
             if (bytes_read == 0) {
                 if (self.read_buffer.items.len == 0) {
@@ -138,9 +138,25 @@ pub const StdioTransport = struct {
     /// Writes a message to stderr for logging.
     pub fn writeStderr(self: *Self, message: []const u8) void {
         _ = self;
-        const stderr = std.fs.File.stderr();
-        stderr.writeAll(message) catch {};
-        stderr.writeAll("\n") catch {};
+        const stderr_fd = std.posix.STDERR_FILENO;
+        writeAllFd(stderr_fd, message) catch {};
+        writeAllFd(stderr_fd, "\n") catch {};
+    }
+
+    fn writeAllFd(fd: std.posix.fd_t, data: []const u8) !void {
+        var written: usize = 0;
+        while (written < data.len) {
+            const remaining = data[written..];
+            const rc = std.c.write(fd, remaining.ptr, remaining.len);
+            if (rc < 0) return error.WriteFailed;
+            written += @intCast(rc);
+        }
+    }
+
+    fn readFd(fd: std.posix.fd_t, buf: []u8) !usize {
+        const rc = std.c.read(fd, buf.ptr, buf.len);
+        if (rc < 0) return error.ReadFailed;
+        return @intCast(rc);
     }
 
     /// Returns a Transport interface for this STDIO transport.
@@ -190,7 +206,7 @@ pub const HttpTransport = struct {
         return .{
             .allocator = allocator,
             .endpoint = owned_endpoint,
-            .pending_responses = .{},
+            .pending_responses = .empty,
         };
     }
 

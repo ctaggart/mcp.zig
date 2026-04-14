@@ -12,9 +12,9 @@ pub fn main() void {
 }
 
 fn run() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    // Use smp_allocator (GPA removed in Zig 0.16)
+    
+    const allocator = std.heap.smp_allocator;
 
     var server = mcp.Server.init(.{
         .name = "calculator-server",

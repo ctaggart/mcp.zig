@@ -186,7 +186,7 @@ pub fn resourceLinkResult(allocator: std.mem.Allocator, name: []const u8, uri: [
 
 /// Creates a tool result with structured JSON content and a text fallback.
 pub fn structuredResult(allocator: std.mem.Allocator, structured: std.json.Value) !ToolResult {
-    var out: std.ArrayList(u8) = .{};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     try jsonrpc.serializeValue(allocator, &out, structured);
     const text_json = try out.toOwnedSlice(allocator);

@@ -13,9 +13,9 @@ pub fn main() void {
 }
 
 fn run() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    // Use smp_allocator (GPA removed in Zig 0.16)
+    
+    const allocator = std.heap.smp_allocator;
 
     // Check for updates in background
     if (mcp.report.checkForUpdates(allocator)) |t| t.detach();
@@ -102,7 +102,7 @@ fn echoHandler(allocator: std.mem.Allocator, args: ?std.json.Value) mcp.tools.To
     // Demonstrate structured result
     var obj = std.json.ObjectMap.init(allocator);
     obj.put("echo", .{ .string = message }) catch {};
-    obj.put("timestamp", .{ .integer = std.time.timestamp() }) catch {};
+    obj.put("timestamp", .{ .integer = std.c.time(null) }) catch {};
 
     return mcp.tools.structuredResult(allocator, .{ .object = obj }) catch return mcp.tools.ToolError.OutOfMemory;
 }

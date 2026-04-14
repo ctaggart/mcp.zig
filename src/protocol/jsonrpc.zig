@@ -254,7 +254,7 @@ fn parseRequestId(value: std.json.Value) !types.RequestId {
 
 /// Serializes a message to a JSON string.
 pub fn serializeMessage(allocator: std.mem.Allocator, message: Message) ![]u8 {
-    var buffer: std.ArrayList(u8) = .{};
+    var buffer: std.ArrayList(u8) = .empty;
     errdefer buffer.deinit(allocator);
 
     switch (message) {

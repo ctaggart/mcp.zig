@@ -13,19 +13,7 @@ pub fn main() void {
 }
 
 fn run() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    // Get command line args for server path
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-
-    if (args.len < 2) {
-        std.debug.print("Usage: {s} <server-command>\n", .{args[0]});
-        std.debug.print("Example: {s} zig-out/bin/example-server\n", .{args[0]});
-        return;
-    }
+    const allocator = std.heap.smp_allocator;
 
     // Create client
     var client = mcp.Client.init(.{
