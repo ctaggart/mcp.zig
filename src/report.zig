@@ -26,9 +26,8 @@ pub fn reportErrorMessage(message: []const u8) void {
     std.debug.print("\nIf you believe this is a bug in mcp.zig, please report it at:\n  {s}\n\n", .{ISSUES_URL});
 }
 
-/// Static flag to ensure update check runs only once per process
-var update_check_done = false;
-var update_check_mutex = std.Thread.Mutex{};
+/// Atomic flag to ensure update check runs only once per process
+var update_check_done_flag: std.atomic.Value(bool) = .init(false);
 
 fn stripVersionPrefix(tag: []const u8) []const u8 {
     if (tag.len == 0) return tag;
@@ -88,12 +87,8 @@ fn fetchLatestTag(allocator: std.mem.Allocator) ![]const u8 {
 pub fn checkForUpdates(allocator: std.mem.Allocator) ?std.Thread {
     if (builtin.is_test) return null;
 
-    update_check_mutex.lock();
-    defer update_check_mutex.unlock();
-
-    // Prevent multiple concurrent update checks
-    if (update_check_done) return null;
-    update_check_done = true;
+    // Atomically set flag to prevent multiple concurrent update checks
+    if (update_check_done_flag.cmpxchgStrong(false, true, .acquire, .monotonic) != null) return null;
 
     return std.Thread.spawn(.{}, checkWorker, .{allocator}) catch null;
 }

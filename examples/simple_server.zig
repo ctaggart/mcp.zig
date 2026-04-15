@@ -100,9 +100,11 @@ fn echoHandler(allocator: std.mem.Allocator, args: ?std.json.Value) mcp.tools.To
     const message = mcp.tools.getString(args, "message") orelse "No message provided";
 
     // Demonstrate structured result
-    var obj = std.json.ObjectMap.init(allocator);
-    obj.put("echo", .{ .string = message }) catch {};
-    obj.put("timestamp", .{ .integer = std.c.time(null) }) catch {};
+    var obj: std.json.ObjectMap = .{};
+    obj.put(allocator, "echo", .{ .string = message }) catch {};
+    var ts: std.c.timespec = .{ .sec = 0, .nsec = 0 };
+    _ = std.c.clock_gettime(.REALTIME, &ts);
+    obj.put(allocator, "timestamp", .{ .integer = ts.sec }) catch {};
 
     return mcp.tools.structuredResult(allocator, .{ .object = obj }) catch return mcp.tools.ToolError.OutOfMemory;
 }
